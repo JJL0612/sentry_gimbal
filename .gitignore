@@ -1,0 +1,35 @@
+# Build directories and generated output
+/cmake-build-*/
+/build/
+/Debug/
+/Release/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.o
+*.obj
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.su
+
+# Local IDE settings and toolchains
+/.idea/
+/.tools/
+/.vscode/
+*.launch
+
+# Host test binaries
+/tests/**/*.exe
+/tests/**/test_communication
+/tests/**/link_tests
+
+# OS and temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+__pycache__/
