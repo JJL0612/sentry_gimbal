@@ -31,7 +31,7 @@ void repairCrc(std::vector<std::uint8_t> &b) {
     b[b.size()-2] = c; b.back() = c >> 8;
 }
 BoardLinkChassisControl decode(chassis_link::Link &l, std::uint32_t now) {
-    std::uint8_t bytes[chassis_link::batch_size];
+    std::uint8_t bytes[chassis_link::command_batch_size];
     assert(l.encode(bytes, sizeof(bytes), now) == sizeof(bytes));
     BoardLinkParser parser{}; BoardLinkParserInit(&parser);
     for (auto b : bytes) BoardLinkParserFeed(&parser, &b, 1, now);
@@ -63,7 +63,7 @@ int main() {
     in.vx = 0.2f; in.vy = -0.1f; in.wz = 0.4f;
     l.update(in, 0); assert(!l.enabled());
     // Bootstrap must not emit an invalid receiver_boot_id=0 control.
-    std::uint8_t initial[chassis_link::batch_size];
+    std::uint8_t initial[chassis_link::command_batch_size];
     assert(l.encode(initial, sizeof(initial), 0) == 34);
     assert(initial[2] == 4 && initial[6] == 20);
     assert(l.encode(initial, 33, 0) == 0);

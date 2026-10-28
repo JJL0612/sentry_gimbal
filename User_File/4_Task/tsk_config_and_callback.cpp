@@ -27,6 +27,7 @@
 #include "2_Device/BSP/Buzzer/bsp_buzzer.h"
 #include "2_Device/BSP/Power/bsp_power.h"
 #include "2_Device/Remote/dvc_dr16.h"
+#include "tsk_dm_imu.h"
 #include "2_Device/Remote/dvc_sbus.h"
 #include "1_Middleware/Algorithm/Filter/Kalman/alg_filter_kalman.h"
 #include "1_Middleware/Algorithm/Matrix/alg_matrix.h"
@@ -98,6 +99,9 @@ bool joint_running_enable = false;
 
 // M3508 固定速度目标: 右拨杆拨到上档后保持正向 20 rad/s, 不使用内置正弦目标
 const float M3508_FIXED_TARGET_OMEGA_RAD_S = 20.0f;
+// Right switch DOWN: fixed chassis yaw rate (rad/s), within the link limit.
+const float CHASSIS_SPIN_TARGET_OMEGA_RAD_S = 0.8f;
+const float BIG_YAW_WHEEL_MAX_RATE_RAD_S = 1.0f;
 // M3508 主动刹车: 右拨杆离开上档后先闭环减速到 0，停稳或超时后再真正失能
 const float M3508_BRAKE_STOP_OMEGA_RAD_S = 0.5f;
 const uint32_t M3508_BRAKE_TIMEOUT_MS = 1500;
@@ -535,6 +539,7 @@ void Task1ms_Callback()
     // DR16 on the gimbal is the command source for both boards.
     // Left switch DOWN disables chassis; MID enables chassis only; UP also enables joints.
     chassis_link::Input chassis_input{};
+    chassis_input.big_yaw_present = true;
     const uint32_t remote_snapshot_mask = __get_PRIMASK();
     __disable_irq(); // Keep channels, switches and remote sequence in one coherent sample.
     chassis_input.remote_online = remote_controllable;
@@ -547,12 +552,20 @@ void Task1ms_Callback()
                                     (sw == DR16_Switch_Status_MIDDLE ? 0 : -1);
         // Body coordinates: +vx forward, +vy left, +wz counterclockwise.
         // DR16 channel 2 = left Y; channel 3 = left X (right positive).
-        chassis_input.vx = Remote.Get_Channel_Centered(2) / 660.0f * 0.3f;
+        chassis_input.vx = -Remote.Get_Channel_Centered(2) / 660.0f * 0.3f;
         chassis_input.vy = -Remote.Get_Channel_Centered(3) / 660.0f * 0.3f;
-        chassis_input.wz = Remote.Get_Wheel() / 660.0f * 0.8f;
+        // Only right-switch DOWN rotates the chassis; wheel controls world yaw of big-Yaw.
+        chassis_input.wz = (Remote.Get_Switch_Right() == DR16_Switch_Status_DOWN)
+                               ? CHASSIS_SPIN_TARGET_OMEGA_RAD_S
+                               : 0.0f;
+        chassis_input.big_yaw_present = true;
+        const float yaw_wheel = Remote.Get_Wheel() / 660.0f;
+        chassis_input.big_yaw_rate_rad_s = (fabsf(yaw_wheel) > 0.05f)
+                                            ? yaw_wheel * BIG_YAW_WHEEL_MAX_RATE_RAD_S : 0.0f;
     }
 #endif
     __set_PRIMASK(remote_snapshot_mask);
+    Dm_Imu_Tick();
     Chassis_Link_Tick(chassis_input);
     // GM6020/达妙共用左拨杆使能，并受遥控安全链路保护
     motor_output_enable = remote_controllable && joint_running_enable;
@@ -886,6 +899,8 @@ void Task_Init()
     CAN_Init(&hfdcan1, CAN1_Callback);
     // 达妙电机独占CAN2
     CAN_Init(&hfdcan2, CAN2_Callback);
+    Dm_Imu_Init();
+    CAN_Init(&hfdcan3, Dm_Imu_Rx); // External gimbal DM-IMU-L1, 1 Mbps.
     // 电源的ADC
     ADC_Init(&hadc1, 1);
     // 遥控接收机的UART5: 100000 baud / 9bit(8数据+偶校验) / 2 stop / 仅RX, 已由 MX_UART5_Init 配置
@@ -916,7 +931,7 @@ void Task_Init()
 
     BSP_Buzzer.Init();
 
-    BSP_Power.Init();
+    BSP_Power.Init(false, false, true); // Enable shared external 5V (CAN3 IMU); keep 24V outputs off.
 
     // 遥控接收机(接 UART5 RX = PD2), 上电默认离线
     Remote.Init();

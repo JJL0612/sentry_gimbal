@@ -95,8 +95,8 @@ void Link::consume(const std::uint8_t *p, std::size_t size, std::uint32_t now) {
 }
 void Link::update(const Input &in, std::uint32_t now) {
     const bool previous_enabled = enabled_;
-    input_ = in;
-    const bool finite = std::isfinite(in.vx) && std::isfinite(in.vy) && std::isfinite(in.wz);
+    input_ = in; input_ms_ = now;
+    const bool finite = std::isfinite(in.vx) && std::isfinite(in.vy) && std::isfinite(in.wz) && (!in.big_yaw_present || std::isfinite(in.big_yaw_rate_rad_s));
     const bool available = boot_id_ && online(now) && peer_allowed_ && in.remote_online && finite;
     if (!available || !was_available_) down_observed_ = false;
     if (available && in.left_switch == -1) down_observed_ = true;
@@ -106,7 +106,8 @@ void Link::update(const Input &in, std::uint32_t now) {
     last_remote_sequence_ = in.remote_sequence;
 }
 std::size_t Link::encode(std::uint8_t *out, std::size_t cap, std::uint32_t now) {
-    const auto required = peer_boot_id_ ? batch_size : heartbeat_frame_size;
+    const auto required = peer_boot_id_ ? (command_batch_size + (input_.imu_present ? imu_frame_size : 0) +
+                                          (input_.big_yaw_present ? big_yaw_frame_size : 0)) : heartbeat_frame_size;
     if (!out || cap < required || !boot_id_) return 0;
     // Re-evaluate freshness even if a caller skipped update().
     if (!online(now)) {
@@ -131,6 +132,33 @@ std::size_t Link::encode(std::uint8_t *out, std::size_t cap, std::uint32_t now) 
     put32(c + 20, command_sequence_);
     put64(c + 24, peer_boot_id_);
     n += frame(out + n, 0x0101, ++tx_sequence_, c, sizeof(c));
+    if (input_.imu_present) {
+        std::uint8_t imu[32]{};
+        const auto elapsed = std::uint32_t(now - input_ms_);
+        const bool valid = input_.imu_valid && elapsed <= 50 &&
+                           input_.imu_sample_age_ms <= 50 - elapsed &&
+                           std::isfinite(input_.imu_yaw_delta_rad) && std::isfinite(input_.imu_yaw_rate_rad_s);
+        imu[0] = valid;
+        putFloat(imu + 4, valid ? input_.imu_yaw_delta_rad : 0);
+        putFloat(imu + 8, valid ? input_.imu_yaw_rate_rad_s : 0);
+        put32(imu + 12, valid ? input_.imu_sample_age_ms + elapsed : 0);
+        put32(imu + 16, input_.imu_sequence);
+        put32(imu + 20, 1); // startup-zero generation; gimbal reboot also changes heartbeat boot ID
+        put64(imu + 24, peer_boot_id_);
+        n += frame(out + n, 0x0404, ++tx_sequence_, imu, sizeof(imu));
+    }
+    if (input_.big_yaw_present) {
+        std::uint8_t yaw[36]{};
+        const auto age = std::uint32_t(now - input_ms_);
+        const bool permitted = active && age <= 100 && std::isfinite(input_.big_yaw_rate_rad_s);
+        yaw[0] = permitted ? 1 : 0; yaw[1] = 1; yaw[2] = permitted;
+        putFloat(yaw + 4, permitted ? limit(input_.big_yaw_rate_rad_s, 1.0f) : 0);
+        put32(yaw + 8, command_sequence_);
+        put32(yaw + 12, age); put32(yaw + 16, age);
+        put64(yaw + 20, peer_boot_id_); put32(yaw + 28, age);
+        put32(yaw + 32, command_sequence_);
+        n += frame(out + n, 0x0402, ++tx_sequence_, yaw, sizeof(yaw));
+    }
     return n;
 }
 } // namespace chassis_link

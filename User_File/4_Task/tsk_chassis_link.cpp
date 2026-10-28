@@ -1,4 +1,5 @@
 #include "tsk_chassis_link.h"
+#include "tsk_dm_imu.h"
 #include "1_Middleware/Driver/UART/drv_uart.h"
 
 chassis_link::Link Chassis_Link;
@@ -57,7 +58,9 @@ void Chassis_Link_Tick(const chassis_link::Input &input) {
     const auto now = HAL_GetTick();
     if (lost) Chassis_Link.discardPartial();
     Chassis_Link.consume(bytes, n, now);
-    Chassis_Link.update(input, now);
+    auto enriched = input;
+    Dm_Imu_FillInput(enriched);
+    Chassis_Link.update(enriched, now);
     if (std::uint32_t(now - last_tx_ms) >= 20 && huart10.gState == HAL_UART_STATE_READY) {
         const auto size = Chassis_Link.encode(tx, sizeof(tx), now);
         if (size && UART_Transmit_Data(&huart10, tx, size) == HAL_OK) last_tx_ms = now;
