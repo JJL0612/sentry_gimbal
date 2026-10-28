@@ -143,7 +143,7 @@ std::size_t Link::encode(std::uint8_t *out, std::size_t cap, std::uint32_t now) 
         putFloat(imu + 8, valid ? input_.imu_yaw_rate_rad_s : 0);
         put32(imu + 12, valid ? input_.imu_sample_age_ms + elapsed : 0);
         put32(imu + 16, input_.imu_sequence);
-        put32(imu + 20, 1); // startup-zero generation; gimbal reboot also changes heartbeat boot ID
+        put32(imu + 20, input_.imu_zero_generation); // Onboard EKF restart changes this generation; board reboot changes heartbeat boot ID
         put64(imu + 24, peer_boot_id_);
         n += frame(out + n, 0x0404, ++tx_sequence_, imu, sizeof(imu));
     }

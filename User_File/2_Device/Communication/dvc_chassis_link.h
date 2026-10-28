@@ -19,6 +19,7 @@ struct Input {
     bool imu_present = false, imu_valid = false;
     float imu_yaw_delta_rad = 0, imu_yaw_rate_rad_s = 0;
     std::uint32_t imu_sample_age_ms = 0, imu_sequence = 0;
+    std::uint32_t imu_zero_generation = 1;
 };
 class Link {
 public:

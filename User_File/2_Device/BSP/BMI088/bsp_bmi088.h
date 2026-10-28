@@ -14,6 +14,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 
+#include "1_Middleware/Algorithm/IMU/alg_onboard_heading.h"
 #include "Accel/bsp_bmi088_accel.h"
 #include "Gyro/bsp_bmi088_gyro.h"
 #include "1_Middleware/Algorithm/Quaternion/alg_quaternion.h"
@@ -53,6 +54,10 @@ public:
     Class_Filter_EKF<4, 3, 3> EKF_Quaternion;
 
     void Init();
+
+    // Caller must serialize with the BMI088 timer/SPI interrupts.
+    gimbal_imu::HeadingSample Get_Heading_Sample() const;
+    inline Class_Matrix_f32<3,1> Get_Compensated_Accel() const { return Vector_Compensated_Accel; }
 
     inline Class_Matrix_f32<3, 1> Get_Original_Accel() const;
 
@@ -132,6 +137,11 @@ protected:
     Struct_BMI088_Status Gyro_Status;
     // 温度计数据状态
     Struct_BMI088_Status Temperature_Status;
+
+    gimbal_imu::PlanarLeverArm Yaw_Lever_Arm;
+    Class_Matrix_f32<3,1> Vector_Compensated_Accel;
+    uint32_t Attitude_Sequence = 0, Attitude_Generation = 0;
+    uint64_t Published_Gyro_Timestamp = 0;
 
     // 加速度计归一化数据
     Class_Matrix_f32<3, 1> Vector_Normalized_Accel;

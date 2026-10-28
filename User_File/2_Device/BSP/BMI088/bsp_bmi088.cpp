@@ -39,6 +39,9 @@ void Class_BMI088::Init()
     // 欧拉角需要辅助初始化EKF, 第一次初始化默认Yaw是0
     Vector_Euler_Angle[0][0] = 0.0f;
 
+    Yaw_Lever_Arm = {};
+    Attitude_Sequence = Attitude_Generation = 0;
+    Published_Gyro_Timestamp = 0;
     Hardware_Init_Finished_Flag = true;
 }
 
@@ -145,7 +148,19 @@ void Class_BMI088::TIM_125us_Calculate_PeriodElapsedCallback()
             Vector_Original_Accel = Class_Matrix_f32<3, 3>(ACCEL_AFFINE_DATA) * Vector_Original_Accel + Class_Matrix_f32<3, 1>(ACCEL_BIAS_DATA) * GRAVITY_ACCELERATION;
         }
 
-        Vector_Normalized_Accel = Vector_Original_Accel.Get_Normalization();
+        // Compensate the measured arm BEFORE EKF gravity normalization/update.
+        // Only differentiate distinct, freshly received gyro samples (not timer invocations).
+        if (BMI088_Gyro.Get_Valid_Flag() && shadow_gyro_status.Update_Timestamp &&
+            now_timestamp >= shadow_gyro_status.Update_Timestamp &&
+            now_timestamp - shadow_gyro_status.Update_Timestamp <= 10000) {
+            Yaw_Lever_Arm.observe_rate(Vector_Original_Gyro[2][0],shadow_gyro_status.Update_Timestamp);
+        }
+        const auto corrected=Yaw_Lever_Arm.correct({Vector_Original_Accel[0][0],
+            Vector_Original_Accel[1][0],Vector_Original_Accel[2][0]});
+        Vector_Compensated_Accel[0][0]=corrected.x;
+        Vector_Compensated_Accel[1][0]=corrected.y;
+        Vector_Compensated_Accel[2][0]=corrected.z;
+        Vector_Normalized_Accel = Vector_Compensated_Accel.Get_Normalization();
     }
     else
     {
@@ -174,6 +189,7 @@ void Class_BMI088::TIM_125us_Calculate_PeriodElapsedCallback()
 
         // 设置标志位
         EKF_Init_Finished_Flag = true;
+        ++Attitude_Generation;
         Gyro_Status.Update_Flag = false;
         Accel_Status.Update_Flag = false;
         // 设置时间戳
@@ -327,11 +343,16 @@ void Class_BMI088::TIM_125us_Calculate_PeriodElapsedCallback()
         // 机体坐标系下的重力加速度
         Class_Matrix_f32<3, 1> vector_gravity_body = Matrix_Rotation.Get_Transpose() * (-Namespace_ALG_Matrix::Axis_Z_3d() * GRAVITY_ACCELERATION);
         // 输出运动学相关变量
-        Vector_Accel_Body = Vector_Original_Accel + vector_gravity_body;
+        Vector_Accel_Body = Vector_Compensated_Accel + vector_gravity_body;
         Vector_Accel_Odom = Matrix_Rotation * Vector_Accel_Body;
         Vector_Gyro_Body = Vector_Original_Gyro;
         Vector_Gyro_Odom = Matrix_Rotation * Vector_Gyro_Body;
 
+        if (shadow_gyro_status.Update_Timestamp != Published_Gyro_Timestamp &&
+            BMI088_Gyro.Get_Valid_Flag()) {
+            Published_Gyro_Timestamp=shadow_gyro_status.Update_Timestamp;
+            ++Attitude_Sequence;
+        }
         Calculating_Time = SYS_Timestamp.Get_Now_Microsecond() - now_timestamp;
 
         if (BMI088_Gyro.Get_Valid_Flag())
@@ -619,3 +640,19 @@ void Class_BMI088::Accel_Chi_Square_Calculate()
 }
 
 /************************ COPYRIGHT(C) USTC-ROBOWALKER **************************/
+
+// No angle integration here: publish the existing onboard EKF's yaw directly.
+gimbal_imu::HeadingSample Class_BMI088::Get_Heading_Sample() const
+{
+    gimbal_imu::HeadingSample s;
+    s.yaw_rad=Vector_Euler_Angle[0][0];
+    s.yaw_rate_rad_s=Vector_Original_Gyro[2][0];
+    s.accel_norm_mps2=std::sqrt(Vector_Compensated_Accel[0][0]*Vector_Compensated_Accel[0][0]+
+        Vector_Compensated_Accel[1][0]*Vector_Compensated_Accel[1][0]+
+        Vector_Compensated_Accel[2][0]*Vector_Compensated_Accel[2][0]);
+    s.sample_us=std::min(Published_Gyro_Timestamp,Accel_Status.Update_Timestamp);
+    s.sequence=Attitude_Sequence;s.generation=Attitude_Generation;
+    s.healthy=Hardware_Init_Finished_Flag&&EKF_Init_Finished_Flag&&
+        BMI088_Gyro.Get_Valid_Flag()&&BMI088_Accel.Get_Valid_Flag();
+    return s;
+}
