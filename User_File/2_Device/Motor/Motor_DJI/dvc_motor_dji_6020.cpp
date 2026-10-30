@@ -260,6 +260,8 @@ void Class_Motor_DJI_GM6020_Position_Control::Init(const FDCAN_HandleTypeDef *hc
     Cnt_1ms = 0;
     Pre_Velocity_Reference = 0.0f;
     Pid_Primed = false;
+    Inertial_Enable = false;
+    Inertial_Feedforward = Inertial_Measured_Rate = 0.0f;
     Sample_Target_Enable = true;
     Target_Angle_Manually = 0.0f;
     Output_Enable = true;
@@ -281,6 +283,22 @@ void Class_Motor_DJI_GM6020_Position_Control::Init(const FDCAN_HandleTypeDef *hc
  *
  * @param elapsed_ms 从启动起的运行时长, ms
  */
+void Class_Motor_DJI_GM6020_Position_Control::Set_Inertial_Velocity(
+    bool enabled, float feedforward, float measured)
+{
+    enabled = enabled && isfinite(feedforward) && isfinite(measured);
+    if (enabled != Inertial_Enable)
+    {
+        PID_Angle.Set_Integral_Error(0.0f);
+        PID_Omega.Set_Integral_Error(0.0f);
+        Pid_Primed = false;
+        Pre_Velocity_Reference = 0.0f;
+    }
+    Inertial_Enable = enabled;
+    Inertial_Feedforward = enabled ? feedforward : 0.0f;
+    Inertial_Measured_Rate = enabled ? measured : 0.0f;
+}
+
 void Class_Motor_DJI_GM6020_Position_Control::TIM_1ms_PeriodElapsedCallback(const int64_t &elapsed_ms)
 {
     Cnt_1ms++;
@@ -425,7 +443,7 @@ void Class_Motor_DJI_GM6020_Position_Control::TIM_1ms_PeriodElapsedCallback(cons
         PID_Angle.Set_Now(now_angle);
         PID_Angle.TIM_Calculate_PeriodElapsedCallback();
         PID_Omega.Set_Target(0.0f);
-        PID_Omega.Set_Now(Motor.Get_Now_Omega());
+        PID_Omega.Set_Now(Inertial_Enable ? Inertial_Measured_Rate : Motor.Get_Now_Omega());
         PID_Omega.TIM_Calculate_PeriodElapsedCallback();
         Pre_Velocity_Reference = 0.0f;
     }
@@ -433,6 +451,7 @@ void Class_Motor_DJI_GM6020_Position_Control::TIM_1ms_PeriodElapsedCallback(cons
     // 2. 位置环 PID -> 速度参考(rad/s)
     const float position_error = target - now_angle;
     const float position_integral_pre = PID_Angle.Get_Integral_Error();
+    const float rate_ff = Inertial_Enable ? Inertial_Feedforward : 0.0f;
     PID_Angle.Set_Target(target);
     PID_Angle.Set_Now(now_angle);
     PID_Angle.TIM_Calculate_PeriodElapsedCallback();
@@ -442,12 +461,18 @@ void Class_Motor_DJI_GM6020_Position_Control::TIM_1ms_PeriodElapsedCallback(cons
     //     输出已饱和且误差仍在把输出推向饱和方向时, 撤销本拍积分
     if (Config.Anti_Windup_Enable && Config.Position_Out_Max_RadS > 0.0f)
     {
-        if ((velocity_ref >= Config.Position_Out_Max_RadS && position_error > 0.0f) ||
-            (velocity_ref <= -Config.Position_Out_Max_RadS && position_error < 0.0f))
+        if ((velocity_ref + rate_ff >= Config.Position_Out_Max_RadS && position_error > 0.0f) ||
+            (velocity_ref + rate_ff <= -Config.Position_Out_Max_RadS && position_error < 0.0f))
         {
             PID_Angle.Set_Integral_Error(position_integral_pre);
         }
     }
+
+    // Compensate big-yaw motion even at zero small-yaw world-angle error.
+    velocity_ref += rate_ff;
+    if (Inertial_Enable)
+        Basic_Math_Constrain(&velocity_ref, -Config.Position_Out_Max_RadS,
+                             Config.Position_Out_Max_RadS);
 
     // 3. 速度参考斜坡限制(样例 kVelocityRampRateRadS2 = 40 rad/s^2)
     if (Config.Velocity_Ramp_RadS2 > 0.0f)
@@ -470,18 +495,33 @@ void Class_Motor_DJI_GM6020_Position_Control::TIM_1ms_PeriodElapsedCallback(cons
     //     行程仅 1.3576 rad 且两端为硬限位, 不限制就会冲进限位顶死
     if (Config.Brake_Distance_Limit_Enable && Config.Velocity_Ramp_RadS2 > 0.0f)
     {
-        const float brake_velocity_max = sqrtf(2.0f * Config.Velocity_Ramp_RadS2 * Basic_Math_Abs(position_error));
+        // In world-stabilized mode the joint must move even at zero aim error.
+        // Brake by remaining MECHANICAL travel, not by the moving virtual target.
+        float brake_distance = Basic_Math_Abs(position_error);
+        if (Inertial_Enable && limit_mode)
+            brake_distance = fmaxf(0.0f, velocity_ref >= 0.0f
+                ? Config.Position_Max_Rad - (now_angle - telemetry_base)
+                : (now_angle - telemetry_base) - Config.Position_Min_Rad);
+        const float brake_velocity_max = sqrtf(2.0f * Config.Velocity_Ramp_RadS2 * brake_distance);
         Basic_Math_Constrain(&velocity_ref, -brake_velocity_max, brake_velocity_max);
     }
 
     // 4. 速度环 PID -> 电流(A)
-    const float now_omega = Motor.Get_Now_Omega();
+    const float now_omega = Inertial_Enable ? Inertial_Measured_Rate : Motor.Get_Now_Omega();
     const float velocity_error = velocity_ref - now_omega;
     const float velocity_integral_pre = PID_Omega.Get_Integral_Error();
     PID_Omega.Set_Target(velocity_ref);
     PID_Omega.Set_Now(now_omega);
     PID_Omega.TIM_Calculate_PeriodElapsedCallback();
-    const float current = PID_Omega.Get_Out();
+    float current = PID_Omega.Get_Out();
+    if (Inertial_Enable && limit_mode &&
+        (((now_angle - telemetry_base) >= Config.Position_Max_Rad && current > 0.0f) ||
+         ((now_angle - telemetry_base) <= Config.Position_Min_Rad && current < 0.0f)))
+    {
+        current = 0.0f;
+        PID_Omega.Set_Integral_Error(velocity_integral_pre);
+        PID_Angle.Set_Integral_Error(position_integral_pre);
+    }
 
     // 4.1 抗积分饱和: 电流已到软限且速度误差仍推向饱和方向时, 撤销本拍积分
     //     否则内环积分会一直积到 ±Current_Max_A, 关节到达目标后仍持续满电流

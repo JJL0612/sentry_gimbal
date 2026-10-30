@@ -1,19 +1,21 @@
 #include "4_Task/tsk_communication.h"
+#include "2_Device/Communication/dvc_uart_link.h"
+#include <cmath>
 #include <cassert>
 #include <cstdio>
 #include <limits>
 #include <vector>
 
-UART_HandleTypeDef huart1, huart7, huart10;
+UART_HandleTypeDef huart1, huart3, huart7, huart10;
 static uint32_t tick;
-static UART_Callback board_rx, nav_rx;
+static UART_Callback nav_rx;
 static uint8_t *active_tx;
 static std::vector<uint8_t> sent;
 uint32_t HAL_GetTick() { return tick; }
 void UART_Init(UART_HandleTypeDef *uart, UART_Callback callback)
 {
-    assert(uart == &huart1 || uart == &huart7); // USART10 belongs to the chassis link.
-    (uart == &huart1 ? board_rx : nav_rx) = callback;
+    assert(uart == &huart1); // USART10 belongs to the chassis link.
+    nav_rx = callback;
 }
 HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef *uart, uint8_t *data, uint16_t length)
 {
@@ -112,49 +114,84 @@ int main()
     assert(link.Send(0x01, nullptr, 0) == HAL_OK && sent[6] == 1);
 
     tick = 0; Communication_Init();
-#if !COMMUNICATION_NAVIGATION_ENABLE
-    assert(board_rx && !nav_rx); // VOFA owns UART7; generic task must not register it.
-    Struct_Navigation_Command disabled_command;
-    assert(!Navigation_Get_Command(disabled_command));
-    assert(Navigation_Send_Feedback(1, 2, 3, 4, 5, 6) == HAL_ERROR);
-    tick = 200; Communication_Task();
-    assert(huart7.gState == HAL_UART_STATE_READY); // no navigation heartbeat on VOFA port
-    puts("communication tests passed (navigation disabled, UART7 reserved for VOFA)");
-    return 0;
-#endif
-    assert(board_rx && nav_rx);
+    assert(nav_rx); // UART7 reserved for VOFA; USART10 for chassis.
     Struct_Navigation_Command command;
-    assert(!Navigation_Get_Command(command) && !command.enable);
-    float velocity[] = {0.2f, -0.1f, 0.3f};
-    std::vector<uint8_t> payload(13);
-    std::memcpy(payload.data(), velocity, 12); payload[12] = 1;
-    auto nav = frame(0x20, payload);
-    nav_rx(nav.data(), 5); Communication_Task();
     assert(!Navigation_Get_Command(command));
-    nav_rx(nav.data() + 5, nav.size() - 5); Communication_Task();
-    assert(Navigation_Get_Command(command) && command.enable && command.vx_m_s == velocity[0]);
-    assert(command.sequence == 7);
-    velocity[0] = std::numeric_limits<float>::quiet_NaN();
-    std::memcpy(payload.data(), velocity, 12);
-    auto nan = frame(0x20, payload);
-    tick = 150; nav_rx(nan.data(), nan.size()); Communication_Task();
-    assert(Navigation_Get_Command(command) && command.received_ms == 0);
-    huart7.gState = HAL_UART_STATE_READY;
-    auto heartbeat = frame(0x01);
-    nav_rx(heartbeat.data(), heartbeat.size()); Communication_Task();
-    tick = 200;
-    assert(!Navigation_Get_Command(command) && !command.enable && command.vx_m_s == 0);
-    payload[12] = 2;
-    auto invalid_enable = frame(0x20, payload);
-    nav_rx(invalid_enable.data(), invalid_enable.size()); Communication_Task();
+    // vx=1.000, vy=-0.500, wz=0.250, XOR=4F (independent fixed vector).
+    std::vector<uint8_t> nav{0xAA,0x06,0xE8,0x03,0x0C,0xFE,0xFA,0x00,0x4F};
+    uint8_t sum = 0; for (unsigned i=0;i<8;++i) sum ^= nav[i];
+    assert(sum == nav[8]);
+    for (unsigned i=0; i<nav.size(); ++i) {
+        nav_rx(&nav[i],1); Communication_Task();
+        assert(Navigation_Get_Command(command) == (i == 8));
+    }
+    assert(command.enable && command.vx_m_s == 1.0f);
+    assert(command.vy_m_s == -0.5f && std::fabs(command.wz_rad_s - 0.25f) < 1e-6f);
+    assert(command.sequence == 1);
+    chassis_link::Input input;
+    input.remote_online = true; input.left_switch = 0;
+    input.vx = input.vy = input.wz = 9;
+    Navigation_Apply_To_Chassis(input);
+    assert(input.vx == -0.5f && input.vy == -1 && std::fabs(input.wz-0.25f)<1e-6f);
+    input.left_switch = 1; input.vx = 0.1f; input.wz = 0.8;
+    Navigation_Apply_To_Chassis(input); assert(input.vx == 0.1f && input.wz == 0.8f);
+    input.left_switch = 0; input.remote_online = false;
+    Navigation_Apply_To_Chassis(input); assert(input.vx == 0 && input.vy == 0 && input.wz == 0);
+    input.remote_online = true;
+    // Bad checksum, noise, bad length, then two frames in one callback.
+    auto burst = nav; burst.back() ^= 1;
+    burst.insert(burst.end(), {0x11,0xAA,0x07});
+    burst.insert(burst.end(), nav.begin(),nav.end());
+    burst.insert(burst.end(), nav.begin(),nav.end());
+    tick = 50; nav_rx(burst.data(),burst.size()); Communication_Task();
+    assert(Navigation_Get_Command(command) && command.sequence == 3);
+    assert(Navigation_Get_Statistics().checksum_errors >= 1);
+    tick = 249; assert(Navigation_Get_Command(command));
+    tick = 250; assert(!Navigation_Get_Command(command) && command.vx_m_s == 0 && !command.enable);
+    input.vx = input.vy = input.wz = 9;
+    Navigation_Apply_To_Chassis(input); assert(input.vx == 0 && input.vy == 0 && input.wz == 0);
+    // Foreground delay must not make stale bytes look fresh.
+    tick = 300; nav_rx(nav.data(),nav.size());
+    tick = 500; Communication_Task(); assert(!Navigation_Get_Command(command));
+    // Partial frame must expire according to arrival time, even if processed together.
+    tick = 600; nav_rx(nav.data(),4);
+    tick = 701; nav_rx(nav.data()+4,5); Communication_Task();
     assert(!Navigation_Get_Command(command));
-    std::memcpy(payload.data(), velocity + 1, 4); // 恢复为有限速度
-    payload[12] = 0;
-    auto stop = frame(0x20, payload);
-    nav_rx(stop.data(), stop.size()); Communication_Task();
-    assert(Navigation_Get_Command(command) && !command.enable);
-    huart7.gState = HAL_UART_STATE_READY;
-    assert(Navigation_Send_Feedback(1, 2, 3, 4, 5, 6) == HAL_OK);
-    assert(sent[3] == 0x21 && sent[4] == 24 && sent.size() == 34);
-    puts("communication tests passed");
+    nav_rx(nav.data(),nav.size()); Communication_Task(); assert(Navigation_Get_Command(command));
+    // Overflow invalidates cached commands immediately and recovers on a new frame.
+    std::vector<uint8_t> flood(2048,0xAA);
+    nav_rx(flood.data(),flood.size()); assert(!Navigation_Get_Command(command));
+    Communication_Task(); nav_rx(nav.data(),nav.size()); Communication_Task();
+    assert(Navigation_Get_Command(command) && Navigation_Get_Statistics().overflows == 1);
+    // Ring wrapping and DMA-sized bursts (512 bytes).
+    for (int i=0;i<300;++i) { nav_rx(nav.data(),nav.size()); Communication_Task(); }
+    std::vector<uint8_t> block(503,0); block.insert(block.end(),nav.begin(),nav.end());
+    nav_rx(block.data(),block.size()); Communication_Task(); assert(Navigation_Get_Command(command));
+    tick = 0xfffffff0; nav_rx(nav.data(),nav.size()); Communication_Task();
+    tick = 20; assert(Navigation_Get_Command(command));
+    tick = 184; assert(!Navigation_Get_Command(command));
+    // Axis regression: compensate the measured 90-degree physical offset.
+    uint8_t forward[] = {0xAA,0x06,0xE8,0x03,0,0,0,0,0x47};
+    uint8_t left[] = {0xAA,0x06,0,0,0xE8,0x03,0,0,0x47};
+    input.left_switch = 0; input.remote_online = true;
+    nav_rx(forward, sizeof(forward)); Communication_Task(); Navigation_Apply_To_Chassis(input);
+    assert(input.vx == 0 && input.vy == -1 && input.wz == 0);
+    nav_rx(left, sizeof(left)); Communication_Task(); Navigation_Apply_To_Chassis(input);
+    assert(input.vx == 1 && input.vy == 0 && input.wz == 0);
+    huart1.gState = HAL_UART_STATE_READY;
+    assert(Navigation_Send_Velocity(1,-0.5f,0.25f) == HAL_OK && sent == nav);
+    const auto saved_nav = sent;
+    assert(Navigation_Send_Velocity(9,8,7) == HAL_BUSY);
+    assert(std::memcmp(active_tx,saved_nav.data(),saved_nav.size()) == 0);
+    huart1.gState = HAL_UART_STATE_READY;
+    assert(Navigation_Send_Velocity(std::numeric_limits<float>::infinity(),0,0) == HAL_ERROR);
+    assert(Navigation_Send_Velocity(100,-100,0) == HAL_OK);
+    assert(sent[2] == 0xFF && sent[3] == 0x7F && sent[4] == 1 && sent[5] == 0x80);
+    huart1.gState = HAL_UART_STATE_READY;
+    Communication_Task(); assert(huart1.gState == HAL_UART_STATE_READY); // No heartbeat on navigation.
+    tick += 1000; Communication_Task();
+    assert(huart1.gState == HAL_UART_STATE_READY); // No generic heartbeat on navigation connector.
+    assert(huart3.gState == HAL_UART_STATE_READY);
+    assert(huart7.gState == HAL_UART_STATE_READY);
+    puts("communication tests passed (generic parser + PA9/PA10 navigation on huart1)");
 }

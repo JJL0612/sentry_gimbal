@@ -15,6 +15,11 @@ struct Snapshot {
     Vector3 raw_accel_mps2{}, corrected_accel_mps2{}, raw_gyro_rad_s{}, gyro_bias_rad_s{};
     float vendor_yaw_rad = 0, pitch_rad = 0, roll_rad = 0, yaw_accel_rad_s2 = 0;
     std::uint32_t accel_age_ms = 0;
+    // Independent vendor heading path for the IMU mounted on small yaw.
+    // Does not apply the legacy big-axis lever-arm AHRS to small yaw.
+    float world_yaw_delta_rad = 0;
+    std::uint32_t world_yaw_age_ms = 0, gyro_age_ms = 0, world_sequence = 0;
+    bool world_valid = false;
 };
 class Sensor {
 public:

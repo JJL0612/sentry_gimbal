@@ -109,7 +109,20 @@ int main(){
  sensor_frame(imu,179.0f,0,1100);
  auto s=imu.snapshot(1100);assert(s.valid&&s.zero_valid&&s.feedback_id==0x11);
  near(s.yaw_delta_rad,0);
+ assert(s.world_valid && s.world_yaw_age_ms==0 && s.gyro_age_ms==0 && s.world_sequence>0);
  sensor_frame(imu,-179.0f,0,1105);s=imu.snapshot(1105);
+ // Small-yaw control uses vendor world heading directly, independent of legacy AHRS.
+ assert(s.world_valid);
+ near(s.world_yaw_delta_rad,2*3.14159265358979323846f/180,0.0002f);
+ assert(!imu.snapshot(1156).world_valid);
+ // Fresh gyro alone cannot keep an old world-angle sample alive.
+ dm_imu::Sensor yaw_stale=imu;
+ vector_frame(yaw_stale,2,{0,0,0},34.88f,1156);
+ assert(!yaw_stale.snapshot(1156).world_valid);
+ dm_imu::Sensor gyro_stale=imu;
+ std::uint8_t fresh_euler[8]={3,0,0,0,0,128,0,0};
+ gyro_stale.consume(0x11,fresh_euler,8,1156);
+ assert(!gyro_stale.snapshot(1156).world_valid);
  // Vendor Euler is for boot/gap alignment; a live Euler jump must not overwrite integrated heading.
  near(s.yaw_delta_rad,0,0.0002f);
  near(s.raw_accel_mps2.z,9.80665f,0.004f);

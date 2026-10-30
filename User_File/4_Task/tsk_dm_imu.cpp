@@ -20,7 +20,8 @@ void Dm_Imu_Tick() {
     if (CAN_Transmit_Data(&hfdcan3, id, data, size) == HAL_OK) ++dm_imu_tx_ok;
     else ++dm_imu_tx_failed;
 }
-// External CAN IMU polling above is diagnostic only; chassis heading uses onboard BMI088.
+// External CAN IMU serves small-yaw world stabilization. Chassis big-yaw feedback
+// below remains the onboard BMI088; the two independent heading origins are not mixed.
 void Dm_Imu_FillInput(chassis_link::Input &input) {
     const auto mask = __get_PRIMASK(); __disable_irq();
     const auto raw = BSP_BMI088.Get_Heading_Sample();

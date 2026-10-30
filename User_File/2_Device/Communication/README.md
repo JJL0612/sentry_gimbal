@@ -1,101 +1,70 @@
-# DM 板间与导航串口通信框架
+# 云台导航串口与板间通信
 
-> 当前 sentry_chassis 底盘正式通信使用 **USART10：PE3 TX / PE2 RX，460800 8N1**，实现见 `dvc_chassis_link.*` 和 `4_Task/tsk_chassis_link.*`，详情见工程根目录《云台底盘通信与遥控说明.md》。下文 USART1 的通用暂定协议是保留的独立链路，不能用于该底盘。UART7 现用于 VOFA（PE8 TX / PE7 RX，115200 8N1，JustFloat），导航功能默认停用。
+## 接口
 
-默认分配（可在 `4_Task/tsk_communication.cpp` 的 Init 和串口回调中对调）：
-
-| 链路 | MCU 外设 | TX | RX | 参数 |
-|---|---|---|---|---|
-| 另一块 DM 主控板 | USART1 / huart1 | PA9 | PA10 | 115200，8N1 |
-| VOFA | UART7 / huart7 | PE8 | PE7 | 115200，8N1，JustFloat |
-
-TX 接对端 RX，RX 接对端 TX，共地，使用 3.3V TTL。小电脑使用匹配电平的 UART 或 USB-TTL。以上为 MCU 引脚，板上插座位置请按实际板卡丝印/原理图确认。
-
-> 下文导航协议仅为保留的实现说明，当前固件 `COMMUNICATION_NAVIGATION_ENABLE=0`，不会注册UART7导航接收，也不发送导航心跳/反馈。不要在VOFA占用UART7时启用导航。USART1通用链路仍独立运行。
-
-## 代码位置与调用关系
-
-- `dvc_uart_link.*`：通用帧协议、ISR 接收队列、前台拆包、DMA 发送、在线统计。
-- `4_Task/tsk_communication.*`：两路实例、业务分发、导航指令缓存、反馈发送、心跳调度。
-- `Task_Init()` 调用 `Communication_Init()` 注册 USART1 接收回调；UART7 回调由 VOFA 注册。
-- `Task_Loop()` 调用 `Communication_Task()`，解析和业务回调在前台执行。
-- `drv_uart.cpp` 对这两路忽略 NORMAL DMA 的 HT 半传输事件，只处理 IDLE/TC。
-
-沿用已生成的 GPIO、DMA、IRQ 配置，未改 CubeMX 外设参数。当前工程仅启用 I-Cache，缓冲区在 DMA 可访问的 RAM_D1；以后启用 D-Cache 时需统一处理 DMA 缓冲区的缓存一致性。
-
-## 暂定协议 v1
-
-这是本框架提供的约定，两端都需要实现；若已有通信协议，可替换设备层解析与封包。
-
-| 字节偏移 | 字段 | 长度 | 说明 |
+| 用途 | 串口 | MCU TX / RX | 配置 |
 |---|---|---|---|
-| 0 | 帧头 | 2 | A5 5A |
-| 2 | 版本 | 1 | 01 |
-| 3 | 消息类型 | 1 | 见下表 |
-| 4 | payload 长度 | 2 | uint16，小端，0~128 |
-| 6 | 帧序号 | 2 | uint16，小端，发送成功后递增，回绕；用于诊断 |
-| 8 | payload | N | 业务数据 |
-| 8+N | CRC16 | 2 | 小端，覆盖帧头到 payload 最后一个字节 |
+| 导航小电脑（板上 USART3 插座） | MCU USART1 / huart1 | PA9 / PA10 | 921600，8N1，普通 UART，无流控 |
+| 底盘板间链路 | USART10 / huart10 | PE3 / PE2 | 460800，8N1，v4 |
+| VOFA | UART7 / huart7 | PE8 / PE7 | 115200，8N1，JustFloat |
 
-CRC-16/CCITT-FALSE：poly=0x1021，init=0xFFFF，refin/refout=false，xorout=0。
-序号目前不用于 ACK、去重或重发；业务若需要可靠确认，应扩展消息类型和状态机。
+**板上插座名称与 MCU 外设编号不同：用户接线图的“USART3”插座实际引脚为 PA9/PA10，在本工程使用 MCU USART1（huart1）。** PA9 TX 接小电脑 RX，PA10 RX 接小电脑 TX，两端共地，3.3V TTL。使用普通 UART，不使用 RS485。MCU USART3（PD8/PD9）恢复原 1000000 baud RS485 配置，不注册导航接收。
 
-| 类型 | 含义 | payload |
+原 USART1 通用链路已停用，不在导航口发送旧通用帧/心跳；其余串口维持原配置。
+
+## 导航速度帧
+
+按用户提供的协议图实现，整帧 **9 字节**；长度字段 `06` 表示六字节速度载荷。
+
+| 偏移 | 字段 | 格式 |
 |---|---|---|
-| 0x01 | 心跳，两路每 100ms 发送 | 空 |
-| 0x10 | DM 板间业务 | 由两块板共同定义，最多 128 字节 |
-| 0x20 | 小电脑 → 本板导航速度 | vx、vy、wz 三个 float32 + enable 一个 uint8，合计 13 字节 |
-| 0x21 | 本板 → 小电脑导航反馈 | x、y、yaw、vx、vy、wz 六个 float32，合计 24 字节 |
+| 0 | 帧头 | 固定 AA |
+| 1 | 长度 | 固定 06 |
+| 2–3 | vx | int16，实际 m/s × 1000 |
+| 4–5 | vy | int16，实际 m/s × 1000 |
+| 6–7 | wz | int16，实际 rad/s × 1000 |
+| 8 | 校验 | 前 8 字节逐字节 XOR |
 
-float32 为 IEEE754 小端；不要直接传输 C/C++ 结构体内存（有填充）。速度坐标系为机体 x 向前、y 向左、wz 逆时针为正，单位 m/s、rad/s。反馈位置为双方约定的固定里程计坐标系，单位 m、rad。`enable` 只能为 0 或 1；NaN/Inf 或长度错误的速度包不更新指令。
+**图片未注明字节序，本实现约定小端（低字节在前），需要小电脑匹配。** 导航指令语义为 x 向前、y 向左、wz 逆时针。根据实机反馈，原直通映射存在“向前变向左、向左变向后”的 90° 偏差，控制接入处现补偿为 `底盘 vx = 导航 vy`、`底盘 vy = -导航 vx`（平移顺时针旋转 90°），wz 保持原值。解析接口保留原始导航速度，发送接口也不进行坐标变换；补偿仅作用于中档导航控制，遥控方向不变。
+例如 vx=1.000、vy=-0.500、wz=0.250：`AA 06 E8 03 0C FE FA 00 4F`。
 
-小电脑封包例子（Python 标准库，无串口库依赖）：
+协议没有 enable、序号、ACK、心跳或里程计字段。每个合法速度帧都更新导航指令；停止时发送三个零速度。建议小电脑每 20–50ms 发送一次。
+
+## 控制模式
+
+- 左拨杆下档：沿用原底盘禁用及重新使能确认流程。
+- 左拨杆中档：底盘 vx/vy/wz 使用导航数据；没有有效指令或接收时间超过/等于 200ms，三个速度全部清零，不回退到摇杆。
+- 左拨杆上档：使用原遥控速度逻辑，包括右拨杆下档的小陀螺；中档旋转速度由导航 wz 决定。
+- 遥控在线、底盘握手、掉线保护和下档重新确认逻辑仍由原板间状态机执行。滚轮的大 Yaw 请求仍沿用原逻辑。
+- 最终底盘发送限幅沿用现有值：vx/vy 各 ±0.3m/s，wz ±0.8rad/s。协议表示范围不等于底盘执行范围。
+
+## 实现与调用
+
+`tsk_communication.*` 注册 MCU USART1 DMA IDLE 接收，ISR 复制字节及实际接收时间，`Communication_Task()` 在前台解包。支持半帧、连续多帧、噪声及校验失败后的重同步；半帧间隔超过 100ms 清除。2048 槽环形缓冲实际容量 2047 字节，溢出立即使导航指令失效，前台丢弃积压并等待新帧。当前仅启用 I-Cache；启用 D-Cache 时需处理 DMA 缓存一致性。
+
+`Task1ms_Callback()` 在构造遥控输入后调用 `Navigation_Apply_To_Chassis()` 选择速度来源，再交给现有 `Chassis_Link_Tick()`。`Navigation_Get_Command()` 可在控制中断读取完整快照，超时返回 false 并清零输出；received_ms 为接收回调时间，不会因前台延迟重新延长有效期。enable 和 sequence 只是本地有效标志及接收计数，不在串口帧中。
+
+调试器或前台可调用 `Navigation_Get_Statistics()` 读取合法帧、校验错误和接收溢出计数。
+
+提供 `Navigation_Send_Velocity(vx, vy, wz)` 按相同格式发送三个速度，有限浮点数四舍五入到 0.001，并限幅到 ±32.767；DMA 忙时返回 HAL_BUSY，缓冲区不会被覆盖。仅供前台单一发送者调用。**当前没有自动回传**：图片没有给出回传数据的含义、触发条件及频率，因而不会发送旧协议心跳或伪造里程计。六字段里程计反馈不能套用此帧。
+
+旧通用 `dvc_uart_link.*` 库文件保留，但不再注册 UART1 实例、不发送心跳。该口仅使用图示的 AA 06 导航协议。
+
+## 小电脑封包示例
 
 ```python
-import binascii
 import struct
+from functools import reduce
+from operator import xor
 
-def pack_frame(msg_type, seq, payload=b''):
-    if len(payload) > 128:
-        raise ValueError('payload too long')
-    data = b'\xA5\x5A' + struct.pack('<BBHH', 1, msg_type, len(payload), seq)
-    data += payload
-    return data + struct.pack('<H', binascii.crc_hqx(data, 0xffff))
+def velocity_frame(vx, vy, wz):
+    # 三个参数单位为 m/s、m/s、rad/s；小端，int16。
+    values = [max(-32767, min(32767, round(v * 1000))) for v in (vx, vy, wz)]
+    data = b'\xAA\x06' + struct.pack('<hhh', *values)
+    return data + bytes([reduce(xor, data, 0)])
 
-# 每 50ms 左右发送新指令；导航停止时发送 enable=0 的零速度。
-frame = pack_frame(0x20, 0, struct.pack('<fffB', 0.2, 0.0, 0.0, 1))
-# serial_port.write(frame)  # 串口对象由小电脑工程创建，115200/8N1
+# serial.Serial('/dev/ttyUSB0', 921600, bytesize=8, parity='N', stopbits=1)
+# port.write(velocity_frame(0.1, 0.0, 0.0))
 ```
 
-## 后续填写的位置
-
-1. `Board_Frame_Callback()`：定义板间 payload 格式，检查长度并复制到业务缓存。回调 payload 指针只在回调期间有效。
-2. `Communication_Task()`：按业务周期发送板间数据，以及真实里程计反馈。当前只自动发送心跳，未用零值伪造里程计。
-3. 底盘控制任务：用 `Navigation_Get_Command()` 获取完整快照，然后结合遥控使能、模式和实际底盘限速执行。当前框架缓存导航指令，没有改变已有电机控制。
-
-```cpp
-// 前台 Communication_Task 中的板间发送示例：
-const uint8_t status[] = {1, 2}; // 示例而非正式协议
-if (DM_Board_Send(status, sizeof(status)) == HAL_OK) {
-    // 发送已启动；HAL_BUSY 时保持待发数据，下次重试。
-}
-
-// 控制任务中的接入示例（需自行接到底盘对象）：
-Struct_Navigation_Command cmd;
-const bool fresh = Navigation_Get_Command(cmd);
-if (fresh && cmd.enable /* && 遥控使能 && 导航模式 */) {
-    // Chassis.Set_Target(...经过限速的 cmd.vx_m_s / vy_m_s / wz_rad_s...);
-} else {
-    // 在导航模式下清零底盘目标速度，不要继续使用上一帧的目标。
-}
-```
-
-所有 Send/Process 接口仅在前台调用；不要由定时器中断或其他模块直接对 huart1/7 发送，以免覆盖同一 DMA 发送缓冲区。内部复制 payload，调用者的局部数组返回后可释放。每路一次只发送一帧，无 TX 排队；HAL_BUSY 时由业务重试。
-
-`Is_Online()` 默认 500ms 内收到任意 CRC 正确的协议帧才为在线，上电为离线；用于前台链路诊断。导航有效性单独由 `Navigation_Get_Command()` 判断，心跳不会延长速度指令寿命。读取返回 false 时输出结构体清零；返回 true 时仍要检查 enable。两端须持续发心跳/业务帧才能让各自接收状态保持在线。
-
-接收支持半帧、连续多帧、错误 CRC 后重同步；半帧间隔超过 100ms 丢弃。每路队列 2048 字节，溢出计数并丢弃积压数据，等待新的完整帧。可在调试器查看 `Get_Rx_Frame_Count()`、`Get_CRC_Error_Count()`、`Get_Overflow_Count()`。
-
-## 验证
-
-固件使用 CMake + ARM GCC 构建。`tests/communication` 提供主机 HAL 桩测试，验证实际解析器及任务接口；不替代两端串口实机联调。
+主机验证见 `tests/communication/README.md`。上板时先架空底盘，确认帧计数和速度方向，再切换中/上档验证模式、停止发包验证 200ms 清零。固件编译和主机测试不能替代实机串口联调。

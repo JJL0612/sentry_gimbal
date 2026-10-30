@@ -478,6 +478,11 @@ public:
 
     inline bool Get_Output_Enable() const;
 
+    // Rates are in encoder-positive joint coordinates. External small-yaw world
+    // gyro minus big-yaw gyro provides the measured relative rate.
+    void Set_Inertial_Velocity(bool enabled, float feedforward, float measured);
+
+
 protected:
     // 内置配置
     Struct_Motor_DJI_GM6020_Position_Control_Config Config;
@@ -491,6 +496,8 @@ protected:
     float Pre_Velocity_Reference = 0.0f;
     // PID 历史是否已用当前测量值同步过(首个有效控制拍做一次, 避免微分冲击)
     bool Pid_Primed = false;
+    bool Inertial_Enable = false;
+    float Inertial_Feedforward = 0.0f, Inertial_Measured_Rate = 0.0f;
     // 1ms 节拍计数器
     uint32_t Cnt_1ms = 0;
 

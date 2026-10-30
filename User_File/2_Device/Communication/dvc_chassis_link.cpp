@@ -95,6 +95,7 @@ void Link::consume(const std::uint8_t *p, std::size_t size, std::uint32_t now) {
 }
 void Link::update(const Input &in, std::uint32_t now) {
     const bool previous_enabled = enabled_;
+    const bool previous_yaw_permission = input_.big_yaw_permission_enabled;
     input_ = in; input_ms_ = now;
     const bool finite = std::isfinite(in.vx) && std::isfinite(in.vy) && std::isfinite(in.wz) && (!in.big_yaw_present || std::isfinite(in.big_yaw_rate_rad_s));
     const bool available = boot_id_ && online(now) && peer_allowed_ && in.remote_online && finite;
@@ -102,7 +103,8 @@ void Link::update(const Input &in, std::uint32_t now) {
     if (available && in.left_switch == -1) down_observed_ = true;
     enabled_ = available && down_observed_ && (in.left_switch == 0 || in.left_switch == 1);
     was_available_ = available;
-    if (in.remote_sequence != last_remote_sequence_ || previous_enabled != enabled_) ++command_sequence_;
+    if (in.remote_sequence != last_remote_sequence_ || previous_enabled != enabled_ ||
+        previous_yaw_permission != in.big_yaw_permission_enabled) ++command_sequence_;
     last_remote_sequence_ = in.remote_sequence;
 }
 std::size_t Link::encode(std::uint8_t *out, std::size_t cap, std::uint32_t now) {
@@ -126,7 +128,9 @@ std::size_t Link::encode(std::uint8_t *out, std::size_t cap, std::uint32_t now) 
     c[0] = active ? 1 : 0; c[1] = 1; c[2] = active ? 2 : 0;
     putFloat(c + 4, active ? limit(input_.vx, 0.3f) : 0);
     putFloat(c + 8, active ? limit(input_.vy, 0.3f) : 0);
-    putFloat(c + 12, active ? limit(input_.wz, 0.8f) : 0);
+    // Remote spin supports 2.0..3.4 rad/s; preserve the navigation limit.
+    const float yaw_limit = input_.left_switch == 1 ? 3.4f : 0.8f;
+    putFloat(c + 12, active ? limit(input_.wz, yaw_limit) : 0);
     put32(c + 16, active ? 0 : 1);
     // Advance on a real remote sample or a safety transition; retransmits retain the sequence.
     put32(c + 20, command_sequence_);
@@ -150,7 +154,8 @@ std::size_t Link::encode(std::uint8_t *out, std::size_t cap, std::uint32_t now) 
     if (input_.big_yaw_present) {
         std::uint8_t yaw[36]{};
         const auto age = std::uint32_t(now - input_ms_);
-        const bool permitted = active && age <= 100 && std::isfinite(input_.big_yaw_rate_rad_s);
+        const bool permitted = active && input_.big_yaw_permission_enabled &&
+                               age <= 100 && std::isfinite(input_.big_yaw_rate_rad_s);
         yaw[0] = permitted ? 1 : 0; yaw[1] = 1; yaw[2] = permitted;
         putFloat(yaw + 4, permitted ? limit(input_.big_yaw_rate_rad_s, 1.0f) : 0);
         put32(yaw + 8, command_sequence_);

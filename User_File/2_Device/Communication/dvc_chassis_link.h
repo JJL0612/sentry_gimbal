@@ -15,6 +15,7 @@ struct Input {
     std::uint32_t remote_sequence = 0;
     float vx = 0, vy = 0, wz = 0;
     bool big_yaw_present = false;
+    bool big_yaw_permission_enabled = true; // False when small-yaw follow feedback is invalid.
     float big_yaw_rate_rad_s = 0; // desired world yaw rate (CCW positive)
     bool imu_present = false, imu_valid = false;
     float imu_yaw_delta_rad = 0, imu_yaw_rate_rad_s = 0;

@@ -79,6 +79,13 @@ Snapshot Sensor::snapshot(std::uint32_t now) const {
     s.raw_gyro_rad_s = gyro_; s.gyro_bias_rad_s = bias_;
     s.vendor_yaw_rad = yaw_; s.pitch_rad = fused_pitch_; s.roll_rad = fused_roll_;
     s.yaw_accel_rad_s2 = ahrs_.yaw_acceleration(); s.accel_age_ms = std::uint32_t(now-accel_tick_);
+    s.world_yaw_delta_rad = wrap(yaw_ - zero_);
+    s.world_yaw_age_ms = std::uint32_t(now - yaw_tick_);
+    s.gyro_age_ms = std::uint32_t(now - gyro_tick_);
+    s.world_sequence = euler_count;
+    s.world_valid = zero_valid_ && euler_count && gyro_count &&
+        s.world_yaw_age_ms <= timeout_ms && s.gyro_age_ms <= timeout_ms &&
+        std::isfinite(s.world_yaw_delta_rad) && std::isfinite(s.yaw_rate_rad_s);
     return s;
 }
 std::size_t request(unsigned slot, std::uint16_t &id, std::uint8_t p[8]) {

@@ -139,7 +139,36 @@ int main() {
     in.left_switch = -1; l.update(in, 257); in.left_switch = 1;
     in.vx = 100; in.vy = -100; in.wz = 100; l.update(in, 258);
     c = decode(l, 258);
-    assert(c.vx_m_s == 0.3f && c.vy_m_s == -0.3f && c.wz_rad_s == 0.8f);
+    assert(c.vx_m_s == 0.3f && c.vy_m_s == -0.3f && c.wz_rad_s == 3.4f);
+    for (float yaw : {2.0f, 2.7f, 3.4f}) {
+        in.wz = yaw; l.update(in, 258);
+        assert(decode(l, 258).wz_rad_s == yaw);
+    }
+    in.left_switch = 0; in.wz = 3.4f; l.update(in, 258);
+    assert(decode(l, 258).wz_rad_s == 0.8f);
+    // Follow feedback loss revokes yaw without stopping chassis or needing a new RC sample.
+    in.big_yaw_present = true; in.big_yaw_rate_rad_s = 0.4f;
+    auto yaw_request = [&]() {
+        std::uint8_t bytes[chassis_link::batch_size];
+        const auto size = l.encode(bytes, sizeof(bytes), 258);
+        BoardLinkParser parser{}; BoardLinkParserInit(&parser);
+        BoardLinkParserFeed(&parser, bytes, size, 258);
+        BoardLinkFrame f{}; BoardLinkBigYawRequest yaw{}; bool found=false;
+        while (BoardLinkParserPop(&parser, &f)) {
+            if (f.message_id == kBoardLinkBigYawRequest) {
+                assert(BoardLinkDecodeBigYawRequest(&f, &yaw)); found=true;
+            }
+        }
+        assert(found); return yaw;
+    };
+    l.update(in,258);const auto permitted=yaw_request();
+    assert(permitted.permission_enabled && permitted.target_rate_rad_s==0.4f);
+    in.big_yaw_permission_enabled=false;l.update(in,258);const auto revoked=yaw_request();
+    assert(l.enabled() && !revoked.permission_enabled && revoked.target_rate_rad_s==0);
+    assert(revoked.source_sequence>permitted.source_sequence);
+    in.big_yaw_permission_enabled=true;l.update(in,258);
+    assert(yaw_request().source_sequence>revoked.source_sequence);
+    in.big_yaw_present=false;
     in.vx = std::numeric_limits<float>::quiet_NaN(); l.update(in, 259);
     assert(!l.enabled());
     assert(decode(l, 259).vx_m_s == 0);
